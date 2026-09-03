@@ -1,0 +1,3 @@
+# Fixtures must be the same bytes on every machine: git rewrites line endings
+# on checkout by default, and a witness a checkout may edit is not a witness.
+testdata/** -text

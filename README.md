@@ -1,0 +1,109 @@
+# webauthn
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-windows/webauthn.svg)](https://pkg.go.dev/github.com/go-windows/webauthn)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-0A6E96?style=flat-square)](LICENSE)
+[![CI](https://github.com/go-windows/webauthn/actions/workflows/ci.yml/badge.svg)](https://github.com/go-windows/webauthn/actions/workflows/ci.yml)
+
+Asks Windows to authenticate somebody, through `webauthn.dll` — the same API
+browsers use. Pure Go, `CGO_ENABLED=0`, no cgo and no SDK.
+
+```go
+a, err := webauthn.Assert(ctx, webauthn.Request{
+    RPID:         "example.test",
+    Origin:       "https://example.test",
+    Challenge:    challenge,               // fresh, always
+    Allow:        []webauthn.Credential{{ID: credentialID}},
+    Attachment:   webauthn.CrossPlatform,  // a security key, not Hello
+    Verification: webauthn.VerificationRequired,
+})
+fmt.Println(a.Transport)   // "usb" — what actually answered
+```
+
+## Why this is not a CTAP transport
+
+Its siblings, [go-macos/fido](https://github.com/go-macos/fido) and
+[go-gnulinux/fido](https://github.com/go-gnulinux/fido), move 64-byte reports
+and let [go-authn/fido](https://github.com/go-authn/fido) speak the protocol.
+This one cannot, and the reason is not a preference.
+
+**Since Windows 10 version 1903, opening a FIDO HID device requires
+elevation.** Microsoft closed that door and pointed everyone at this API. A
+CTAP transport here would work only for administrators, which is not a program
+anybody should ship. The measure of that wall is what it takes to get around
+it: the one project that does installs an elevated Windows *service* and relays
+CTAPHID over a named pipe.
+
+So Windows speaks the protocol, shows its own dialog, collects the PIN or the
+fingerprint itself, and hands back an assertion. `go-authn/fido` is not
+underneath this package. That the three platforms end up with different shapes
+is fine —
+[go-authn/mfa](https://github.com/go-authn/mfa) asks for a `Factor`, not for a
+transport.
+
+## What was proved, and what only somebody could tell you
+
+An assertion says a credential answered, and its flags say whether the
+authenticator verified who was holding it. It does **not** say what convinced
+it. Windows Hello accepts a face, a fingerprint, or a **PIN** — and a PIN is
+something *known*, not something anyone *is*. Reporting "user verified" as
+biometrics would be reporting the wrong kind of proof, which is the one thing a
+multi-factor policy exists to prevent.
+
+Two things narrow it, and both are here:
+
+- **`Attachment` constrains what may answer.** `CrossPlatform` asks for a
+  security key — something carried. `Platform` asks for the one built into this
+  machine.
+- **`Assertion.Transport` reports what actually answered.** Asking is a
+  request; this is an observation, and they can differ.
+
+`Transport.Carried()` returns **two** values, deliberately. Windows fills the
+transport in only from version 4 of its assertion structure, and an older one
+says nothing at all. Reading silence as "not carried" would quietly downgrade
+every security key on those machines to something built in, so silence is
+reported as silence.
+
+## What it refuses to confuse
+
+- **Dismissing the dialog is not failing.** `Error.Cancelled()` is separate:
+  nobody was refused, somebody changed their mind, and saying otherwise accuses
+  them.
+- **Nothing there to ask is not a refusal.** `Error.Unavailable()` covers
+  `NTE_DEVICE_NOT_FOUND`, `NTE_NOT_FOUND` and `NTE_NOT_SUPPORTED`.
+- **Cancelling the context cancels the operation *through Windows*.** The
+  package asks for a cancellation id and uses
+  `WebAuthNCancelCurrentOperation`, so the dialog comes down. Abandoning the
+  wait instead would leave it on the person's screen with nothing behind it.
+- **The client data is returned, not describable.** What is signed is those
+  exact bytes; a verifier that rebuilds them and gets one space different sees
+  every signature as forged. It is also built with a JSON encoder rather than a
+  format string, so an origin containing a quote does not produce a call
+  Windows rejects with a parameter error that names no parameter.
+
+## The two things a compiler cannot catch
+
+**`dwVersion` tells the DLL how many fields were laid out. It does not tell it
+where they are.** A field in the wrong place is read as whatever sits at that
+offset — a length taken from a pointer, a pointer taken from a length — and
+nothing reports it. A test pins every size and offset against `webauthn.h` and
+the C alignment rules.
+
+**A status table is exactly the kind of thing that looks right and is not.** A
+sibling package shipped one written from memory with five wrong entries, and a
+real device caught it rather than a test. So the HRESULTs here are checked, on
+the Windows lane, against `golang.org/x/sys/windows`'s own constants — which
+are generated from the SDK headers. The set is the one libfido2's `winhello.c`
+translates.
+
+## What is not here
+
+**Registration.** `WebAuthNAuthenticatorMakeCredential` is not bound yet, so
+this package asserts credentials registered somewhere else. Its structure is
+larger and its layout carries the same silent risk, so it gets its own pass
+rather than being tacked on.
+
+**A run against a real authenticator.** Everything that needs no dialog is
+covered to 100%, on Linux, and the layout and error tables are checked on the
+Windows lane. But a CI runner has no security key and nobody to touch it: the
+call itself has never been made. That is the honest state, and it wants one run
+on a Windows machine with a key in it.
