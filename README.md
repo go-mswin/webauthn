@@ -1,8 +1,8 @@
 # webauthn
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/go-windows/webauthn.svg)](https://pkg.go.dev/github.com/go-windows/webauthn)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-mswin/webauthn.svg)](https://pkg.go.dev/github.com/go-mswin/webauthn)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-0A6E96?style=flat-square)](LICENSE)
-[![CI](https://github.com/go-windows/webauthn/actions/workflows/ci.yml/badge.svg)](https://github.com/go-windows/webauthn/actions/workflows/ci.yml)
+[![CI](https://github.com/go-mswin/webauthn/actions/workflows/ci.yml/badge.svg)](https://github.com/go-mswin/webauthn/actions/workflows/ci.yml)
 
 Asks Windows to authenticate somebody, through `webauthn.dll` — the same API
 browsers use. Pure Go, `CGO_ENABLED=0`, no cgo and no SDK.
@@ -18,6 +18,19 @@ a, err := webauthn.Assert(ctx, webauthn.Request{
 })
 fmt.Println(a.Transport)   // "usb" — what actually answered
 ```
+
+## Where it sits in go-mswin
+
+[go-mswin/winrt](https://github.com/go-mswin/winrt) already answers the OTHER
+half: `RequireUserConsent` asks Windows Hello, through `UserConsentVerifier`.
+That is the authenticator built into the machine. This package is for the one
+somebody carries — and for the case where you need a signed assertion rather
+than a yes.
+
+[go-mswin/win32](https://github.com/go-mswin/win32) is where windows come from,
+which matters here: the dialog is modal to an `HWND`. Pass your own through
+`Request.Window`; leaving it zero borrows the foreground, which is what a
+console program has to do and what Teleport does in production.
 
 ## Why this is not a CTAP transport
 
@@ -39,6 +52,10 @@ underneath this package. That the three platforms end up with different shapes
 is fine —
 [go-authn/mfa](https://github.com/go-authn/mfa) asks for a `Factor`, not for a
 transport.
+
+And it cuts the other way too: on Windows the platform half is `winrt`, not
+this, so a future `go-mswin/factors` will draw its two kinds from two different
+packages. That is what the layering was for.
 
 ## What was proved, and what only somebody could tell you
 

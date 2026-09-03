@@ -1,4 +1,4 @@
-// Copyright (c) the go-windows authors. All rights reserved.
+// Copyright (c) the go-mswin authors. All rights reserved.
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
@@ -152,13 +152,18 @@ func Available() bool {
 	return uint32(r) == 0 && ok != 0
 }
 
-// window returns a handle for the dialog to belong to.
+// foregroundWindow borrows a handle for the dialog to belong to.
 //
-// Windows Hello REQUIRES one: the dialog is modal to a window, and without it
-// the call fails. A program with no window of its own borrows whatever is in
-// front, which is what a console program has to do; libfido2 falls back the
+// Windows REQUIRES one: the dialog is modal to a window, and without it the
+// call fails. A program with no window of its own has to borrow, and borrowing
+// the foreground is what Teleport does in production; libfido2 falls back the
 // same way when the foreground window cannot be had.
-func window() uintptr {
+//
+// A program that HAS a window should pass [Request.Window] instead, because
+// borrowing parents a modal dialog to somebody else's window -- it can end up
+// behind theirs, or move when they move. go-mswin/win32 is where windows come
+// from.
+func foregroundWindow() uintptr {
 	if h, _, _ := procGetForegroundWnd.Call(); h != 0 {
 		return h
 	}
@@ -261,8 +266,12 @@ func Assert(ctx context.Context, req Request) (*Assertion, error) {
 	}
 
 	var out *webauthnAssertion
+	hwnd := req.Window
+	if hwnd == 0 {
+		hwnd = foregroundWindow()
+	}
 	hr, _, _ := procGetAssertion.Call(
-		window(),
+		hwnd,
 		uintptr(unsafe.Pointer(rpID)),
 		uintptr(unsafe.Pointer(&data)),
 		uintptr(unsafe.Pointer(&opts)),

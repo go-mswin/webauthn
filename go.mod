@@ -1,4 +1,4 @@
-module github.com/go-windows/webauthn
+module github.com/go-mswin/webauthn
 
 go 1.26.4
 

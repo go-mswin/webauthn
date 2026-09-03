@@ -1,4 +1,4 @@
-// Copyright (c) the go-windows authors. All rights reserved.
+// Copyright (c) the go-mswin authors. All rights reserved.
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
@@ -189,6 +189,15 @@ type Request struct {
 	// TimeoutMilliseconds is guidance to Windows, which may override it. Zero
 	// leaves the choice to Windows.
 	TimeoutMilliseconds uint32
+	// Window is the HWND the Windows dialog belongs to. Zero borrows whatever
+	// is in the foreground, which is what a console program has to do.
+	//
+	// A program that HAS a window should pass its own. Borrowing means the
+	// modal dialog parents to somebody else's window: it can end up behind
+	// theirs, or move when they move. go-mswin/win32 makes windows; this field
+	// is a uintptr rather than a win32.HWND because Request is compiled on
+	// every platform and that type is not.
+	Window uintptr
 }
 
 // Assertion is what Windows returns.

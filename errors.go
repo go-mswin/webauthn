@@ -1,4 +1,4 @@
-// Copyright (c) the go-windows authors. All rights reserved.
+// Copyright (c) the go-mswin authors. All rights reserved.
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
