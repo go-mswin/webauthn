@@ -80,6 +80,24 @@ says nothing at all. Reading silence as "not carried" would quietly downgrade
 every security key on those machines to something built in, so silence is
 reported as silence.
 
+## Registration reports what the authenticator DID
+
+`Register` makes a credential. Two of the things it returns are observations
+rather than echoes of the request, and they are where a caller gets caught:
+
+- **`Registration.Discoverable`** says whether a discoverable credential was
+  actually made. Asking for one is a request, and an authenticator with no room
+  left declines it while still making a perfectly good credential — which then
+  cannot be used without naming its id. A caller who assumed otherwise has
+  locked somebody out of an account they can no longer select. `DiscoverableKnown`
+  is separate again, because older Windows does not report it at all.
+- **`Registration.Transport`** says what answered, exactly as on the assertion
+  side.
+
+The user handle is bounded at 64 bytes here, which is WebAuthn's rule rather
+than Windows's, and it should be an opaque identifier rather than an email
+address — also the specification's rule, and a privacy one.
+
 ## What it refuses to confuse
 
 - **Dismissing the dialog is not failing.** `Error.Cancelled()` is separate:
@@ -97,13 +115,25 @@ reported as silence.
   format string, so an origin containing a quote does not produce a call
   Windows rejects with a parameter error that names no parameter.
 
+## 64-bit Windows only
+
+`amd64` and `arm64`, which is where
+[go-mswin/win32](https://github.com/go-mswin/win32) draws the line too. On
+`386` a pointer is four bytes and every structure size differs, so building the
+real implementation there would produce a package that compiles and reads the
+wrong fields. `windows/386` gets the stub, and its error says the architecture
+is the reason rather than leaving somebody to wonder whether their Windows is
+too old.
+
 ## The two things a compiler cannot catch
 
 **`dwVersion` tells the DLL how many fields were laid out. It does not tell it
 where they are.** A field in the wrong place is read as whatever sits at that
 offset — a length taken from a pointer, a pointer taken from a length — and
 nothing reports it. A test pins every size and offset against `webauthn.h` and
-the C alignment rules.
+the C alignment rules, and the sizes are asserted a second time **at compile
+time**, so a layout edited on a Mac fails on that Mac rather than twenty minutes
+later on a Windows runner.
 
 **A status table is exactly the kind of thing that looks right and is not.** A
 sibling package shipped one written from memory with five wrong entries, and a
@@ -113,11 +143,6 @@ are generated from the SDK headers. The set is the one libfido2's `winhello.c`
 translates.
 
 ## What is not here
-
-**Registration.** `WebAuthNAuthenticatorMakeCredential` is not bound yet, so
-this package asserts credentials registered somewhere else. Its structure is
-larger and its layout carries the same silent risk, so it gets its own pass
-rather than being tacked on.
 
 **A run against a real authenticator.** Everything that needs no dialog is
 covered to 100%, on Linux, and the layout and error tables are checked on the

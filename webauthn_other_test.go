@@ -2,13 +2,14 @@
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows
+//go:build !windows || (windows && !amd64 && !arm64)
 
 package webauthn
 
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -28,7 +29,18 @@ func TestOffWindowsThisIsUnsupported(t *testing.T) {
 	if !errors.Is(err, ErrUnsupported) {
 		t.Errorf("Assert = %v, want unsupported", err)
 	}
+	if _, err := Register(context.Background(), RegisterRequest{
+		RPID: "example.test", RPName: "Example", Origin: "https://example.test",
+		Challenge: []byte("c"), User: User{ID: []byte("uid")},
+	}); !errors.Is(err, ErrUnsupported) {
+		t.Errorf("Register = %v, want unsupported", err)
+	}
 	if errors.Is(ErrUnsupported, ErrCancelled) {
 		t.Error("the wrong operating system reads as a cancellation")
+	}
+	// windows/386 lands here too, and the message must say why rather than
+	// leaving somebody to wonder whether their Windows is too old.
+	if !strings.Contains(ErrUnsupported.Error(), "64-bit") {
+		t.Errorf("ErrUnsupported = %q, which does not say the architecture is the reason", ErrUnsupported)
 	}
 }

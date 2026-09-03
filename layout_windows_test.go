@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build windows
+//go:build windows && (amd64 || arm64)
 
 package webauthn
 
@@ -83,6 +83,53 @@ func TestTheErrorNumbersAreTheKernels(t *testing.T) {
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %#08x, x/sys says %#08x", c.name, c.got, c.want)
+		}
+	}
+}
+
+// TestTheRegistrationStructsAreLaidOutLikeTheHeader.
+//
+// Same reasoning as the assertion side, and the same arithmetic: DWORD is four
+// bytes, a pointer is eight on 64-bit, and a pointer is aligned to its size, so
+// a DWORD before one is followed by four bytes of padding.
+func TestTheRegistrationStructsAreLaidOutLikeTheHeader(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("the offsets below are the 64-bit ones")
+	}
+	for _, c := range []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"WEBAUTHN_RP_ENTITY_INFORMATION size", unsafe.Sizeof(webauthnRPEntity{}), 32},
+		{"WEBAUTHN_USER_ENTITY_INFORMATION size", unsafe.Sizeof(webauthnUserEntity{}), 40},
+		{"  .pbId", unsafe.Offsetof(webauthnUserEntity{}.pbID), 8},
+		{"  .pwszDisplayName", unsafe.Offsetof(webauthnUserEntity{}.pwszDisplayName), 32},
+		{"WEBAUTHN_COSE_CREDENTIAL_PARAMETER size", unsafe.Sizeof(webauthnCoseParam{}), 24},
+		{"  .lAlg", unsafe.Offsetof(webauthnCoseParam{}.lAlg), 16},
+		{"WEBAUTHN_COSE_CREDENTIAL_PARAMETERS size", unsafe.Sizeof(webauthnCoseParams{}), 16},
+
+		{"MAKE_CREDENTIAL_OPTIONS size (through v2)", unsafe.Sizeof(webauthnMakeCredentialOptions{}), 72},
+		{"  .CredentialList", unsafe.Offsetof(webauthnMakeCredentialOptions{}.credentialList), 8},
+		{"  .Extensions", unsafe.Offsetof(webauthnMakeCredentialOptions{}.extensions), 24},
+		{"  .dwAuthenticatorAttachment", unsafe.Offsetof(webauthnMakeCredentialOptions{}.dwAuthenticatorAttachment), 40},
+		{"  .bRequireResidentKey", unsafe.Offsetof(webauthnMakeCredentialOptions{}.bRequireResidentKey), 44},
+		{"  .dwUserVerificationRequirement", unsafe.Offsetof(webauthnMakeCredentialOptions{}.dwUserVerificationRequirement), 48},
+		{"  .dwAttestationConveyancePreference", unsafe.Offsetof(webauthnMakeCredentialOptions{}.dwAttestationConveyancePreference), 52},
+		{"  .pCancellationId", unsafe.Offsetof(webauthnMakeCredentialOptions{}.pCancellationID), 64},
+
+		{"CREDENTIAL_ATTESTATION size (through v4)", unsafe.Sizeof(webauthnCredentialAttestation{}), 136},
+		{"  .pwszFormatType", unsafe.Offsetof(webauthnCredentialAttestation{}.pwszFormatType), 8},
+		{"  .pbAuthenticatorData", unsafe.Offsetof(webauthnCredentialAttestation{}.pbAuthenticatorData), 24},
+		{"  .pbAttestation", unsafe.Offsetof(webauthnCredentialAttestation{}.pbAttestation), 40},
+		{"  .pbAttestationObject", unsafe.Offsetof(webauthnCredentialAttestation{}.pbAttestationObject), 72},
+		{"  .pbCredentialId", unsafe.Offsetof(webauthnCredentialAttestation{}.pbCredentialID), 88},
+		{"  .Extensions", unsafe.Offsetof(webauthnCredentialAttestation{}.extensions), 96},
+		{"  .dwUsedTransport", unsafe.Offsetof(webauthnCredentialAttestation{}.dwUsedTransport), 112},
+		{"  .bResidentKey", unsafe.Offsetof(webauthnCredentialAttestation{}.bResidentKey), 124},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %d, the header says %d", c.name, c.got, c.want)
 		}
 	}
 }
