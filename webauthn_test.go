@@ -215,3 +215,90 @@ func TestEveryNamedCodeHasAName(t *testing.T) {
 		}
 	}
 }
+
+func TestARegistrationIsCheckedBeforeWindowsIsAsked(t *testing.T) {
+	ok := RegisterRequest{
+		RPID: "example.test", RPName: "Example", Origin: "https://example.test",
+		Challenge: []byte("c"), User: User{ID: []byte("uid"), Name: "jane", DisplayName: "Jane"},
+	}
+	if err := ok.check(); err != nil {
+		t.Fatalf("a complete registration was refused: %v", err)
+	}
+	long := ok
+	long.User.ID = make([]byte, MaxUserIDLength+1)
+	for _, c := range []struct {
+		name string
+		req  RegisterRequest
+		want string
+	}{
+		{"no relying party", RegisterRequest{RPName: "E", Origin: "https://x", Challenge: []byte("c"), User: ok.User}, "relying party id"},
+		{"no relying party NAME", RegisterRequest{RPID: "e.test", Origin: "https://e.test", Challenge: []byte("c"), User: ok.User}, "relying party name"},
+		{"no origin", RegisterRequest{RPID: "e.test", RPName: "E", Challenge: []byte("c"), User: ok.User}, "needs an origin"},
+		{"somebody else's origin", RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://evil.test", Challenge: []byte("c"), User: ok.User}, "does not belong"},
+		{"no challenge", RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://e.test", User: ok.User}, "challenge"},
+		{"no user id", RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://e.test", Challenge: []byte("c")}, "user id"},
+		{"a user id too long for the specification", long, "the most WebAuthn allows"},
+		{
+			"an excluded credential with no id",
+			RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://e.test", Challenge: []byte("c"), User: ok.User, Exclude: []Credential{{}}},
+			"has no id",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.req.check()
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error is %q, which does not mention %q", err, c.want)
+			}
+		})
+	}
+}
+
+// TestES256IsOfferedWhenNothingIsAsked. Offering nothing at all is not a
+// default a caller can want: Windows would have no algorithm to make a
+// credential with.
+func TestES256IsOfferedWhenNothingIsAsked(t *testing.T) {
+	got := RegisterRequest{}.algorithms()
+	if len(got) != 1 || got[0] != COSEAlgorithmES256 {
+		t.Errorf("algorithms() = %v, want [%d]", got, COSEAlgorithmES256)
+	}
+	if got := (RegisterRequest{Algorithms: []int32{-257, -7}}).algorithms(); len(got) != 2 || got[0] != -257 {
+		t.Errorf("algorithms() = %v, which did not keep the caller's order", got)
+	}
+}
+
+// TestTheRegistrationClientDataSaysCreate, not get: the type is part of what
+// is signed, and a verifier checks it. Sending "webauthn.get" for a
+// registration produces a signature every relying party rejects.
+func TestTheRegistrationClientDataSaysCreate(t *testing.T) {
+	b, err := clientData("webauthn.create", "https://example.test", []byte("c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["type"] != "webauthn.create" {
+		t.Errorf("type = %v", got["type"])
+	}
+}
+
+// TestAskingForADiscoverableCredentialIsNotGettingOne.
+//
+// An authenticator with no room left says no and makes an ordinary credential.
+// A caller who assumed otherwise has locked somebody out of an account they
+// can no longer select, so the answer is reported separately from the request
+// -- and separately again from "this Windows did not say".
+func TestDiscoverableIsReportedSeparatelyFromBeingAsked(t *testing.T) {
+	var r Registration
+	if r.Discoverable || r.DiscoverableKnown {
+		t.Error("the zero Registration claims to know something")
+	}
+	r = Registration{Discoverable: false, DiscoverableKnown: true}
+	if r.Discoverable || !r.DiscoverableKnown {
+		t.Error("a reported no is not distinguishable from silence")
+	}
+}

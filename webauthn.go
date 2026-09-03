@@ -242,7 +242,8 @@ func (e *Error) Error() string {
 var (
 	// ErrUnsupported is returned off Windows, and on a Windows too old to have
 	// the API -- it arrived in version 1903.
-	ErrUnsupported = errors.New("webauthn: the Windows WebAuthn API is not available here")
+	ErrUnsupported = errors.New("webauthn: the Windows WebAuthn API is not available here; " +
+		"this package targets 64-bit Windows (amd64, arm64), as go-mswin/win32 does")
 
 	// ErrCancelled is returned when the person dismissed the dialog, or the
 	// context ended and the operation was cancelled.
@@ -300,4 +301,146 @@ func (r Request) check() error {
 		}
 	}
 	return nil
+}
+
+// AttestationPreference says how much the authenticator should say about
+// itself when a credential is made.
+type AttestationPreference uint32
+
+// The preferences, numbered as webauthn.h numbers them.
+const (
+	AttestationAny      AttestationPreference = 0
+	AttestationNone     AttestationPreference = 1
+	AttestationIndirect AttestationPreference = 2
+	AttestationDirect   AttestationPreference = 3
+)
+
+// User is who the credential belongs to.
+//
+// None of this is a secret and none of it is checked by anybody: Windows shows
+// Name and DisplayName in its own dialog so a person can tell one credential
+// from another, and hands ID back to a relying party later.
+type User struct {
+	// ID is the user handle. It is returned in a later assertion, so it should
+	// identify the account WITHOUT being the account name -- a random 32 bytes
+	// stored beside the account, not an email address, which is a WebAuthn
+	// privacy rule rather than a preference of this package.
+	ID []byte
+	// Name is the account name, e.g. "jane@example.test".
+	Name string
+	// DisplayName is what a person is called, e.g. "Jane Smith".
+	DisplayName string
+}
+
+// Registration is what Windows returns when a credential is made.
+type Registration struct {
+	// CredentialID is what a later [Request.Allow] names.
+	CredentialID []byte
+	// AuthenticatorData carries the flags, the sign counter, and the new
+	// credential's public key.
+	AuthenticatorData []byte
+	// AttestationObject is the CBOR object a relying party verifies, when it
+	// verifies attestation at all.
+	AttestationObject []byte
+	// Format is the attestation statement format, e.g. "packed" or "none".
+	Format string
+	// ClientDataJSON is what was hashed into the signature.
+	ClientDataJSON []byte
+	// Transport is what actually answered, or [TransportUnknown] when this
+	// Windows did not say.
+	Transport Transport
+	// Discoverable reports whether a discoverable credential was actually
+	// made, and Known says whether Windows reported it at all.
+	//
+	// ⛔ [Registration.Discoverable] is an OBSERVATION. Asking for one through
+	// [RegisterRequest.Discoverable] is a request, and an authenticator may
+	// decline it while still making a perfectly good credential -- which then
+	// cannot be used without naming its id, and a caller that assumed
+	// otherwise has locked somebody out of an account they can no longer
+	// select.
+	Discoverable, DiscoverableKnown bool
+}
+
+// RegisterRequest makes a credential.
+type RegisterRequest struct {
+	// RPID is the relying party the credential will belong to, and RPName is
+	// what Windows shows a person. Both are required.
+	RPID, RPName string
+	// Origin is what goes in the client data. For a program that is not a web
+	// page, use "https://" + RPID.
+	Origin string
+	// User is who the credential belongs to. ID is required.
+	User User
+	// Challenge is the bytes to be signed over. Fresh, always.
+	Challenge []byte
+	// Algorithms are the COSE algorithm identifiers to offer, most preferred
+	// first. Empty offers ES256 alone, which every authenticator supports.
+	Algorithms []int32
+	// Exclude lists credentials that must NOT answer, so an authenticator
+	// already registered here says so instead of making a second one.
+	Exclude []Credential
+	// Attachment constrains what may answer.
+	Attachment Attachment
+	// Discoverable asks for a credential the authenticator can find without
+	// being told its id. Read [Registration.Discoverable] to learn whether it
+	// did: a key with no room left says no and makes an ordinary one.
+	Discoverable bool
+	// Verification says whether the authenticator must establish who is
+	// holding it.
+	Verification UserVerification
+	// Attestation says how much the authenticator should reveal about itself.
+	// The default, [AttestationAny], lets Windows decide.
+	Attestation AttestationPreference
+	// TimeoutMilliseconds is guidance to Windows, which may override it.
+	TimeoutMilliseconds uint32
+	// Window is the HWND the dialog belongs to. Zero borrows the foreground.
+	Window uintptr
+}
+
+// COSEAlgorithmES256 is ECDSA over P-256 with SHA-256: the one algorithm every
+// authenticator supports, and the default here.
+const COSEAlgorithmES256 int32 = -7
+
+// check refuses a request that cannot be honoured, before Windows is asked.
+func (r RegisterRequest) check() error {
+	if r.RPID == "" {
+		return fmt.Errorf("webauthn: a registration needs a relying party id")
+	}
+	if r.RPName == "" {
+		return fmt.Errorf("webauthn: a registration needs a relying party name; Windows shows it to the person")
+	}
+	if r.Origin == "" {
+		return fmt.Errorf("webauthn: a registration needs an origin; for a program that is not a web page, %q", "https://"+r.RPID)
+	}
+	if !strings.Contains(r.Origin, r.RPID) {
+		return fmt.Errorf("webauthn: origin %q does not belong to relying party %q", r.Origin, r.RPID)
+	}
+	if len(r.Challenge) == 0 {
+		return fmt.Errorf("webauthn: a registration needs a challenge, and a fresh one")
+	}
+	if len(r.User.ID) == 0 {
+		return fmt.Errorf("webauthn: a registration needs a user id")
+	}
+	if len(r.User.ID) > MaxUserIDLength {
+		return fmt.Errorf("webauthn: the user id is %d bytes; %d is the most WebAuthn allows",
+			len(r.User.ID), MaxUserIDLength)
+	}
+	for i, c := range r.Exclude {
+		if len(c.ID) == 0 {
+			return fmt.Errorf("webauthn: excluded credential %d has no id", i)
+		}
+	}
+	return nil
+}
+
+// MaxUserIDLength is WEBAUTHN_MAX_USER_ID_LENGTH. A longer handle is refused
+// by the specification, not merely by Windows.
+const MaxUserIDLength = 64
+
+// algorithms returns what to offer, defaulting to ES256 alone.
+func (r RegisterRequest) algorithms() []int32 {
+	if len(r.Algorithms) == 0 {
+		return []int32{COSEAlgorithmES256}
+	}
+	return r.Algorithms
 }

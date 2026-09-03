@@ -2,7 +2,12 @@
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build windows
+// The 64-bit Windows targets only, which is where go-mswin/win32 -- this org's
+// foundation -- draws the line too. The structure layouts below are 64-bit
+// truths: on 386 a pointer is four bytes and every size differs, so building
+// this there would produce a package that compiles and reads the wrong fields.
+// windows/386 gets the stub, which says so out loud.
+//go:build windows && (amd64 || arm64)
 
 package webauthn
 
@@ -21,12 +26,14 @@ import (
 var (
 	dll = windows.NewLazySystemDLL("webauthn.dll")
 
-	procGetAPIVersionNumber = dll.NewProc("WebAuthNGetApiVersionNumber")
-	procIsPlatformAvailable = dll.NewProc("WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable")
-	procGetAssertion        = dll.NewProc("WebAuthNAuthenticatorGetAssertion")
-	procFreeAssertion       = dll.NewProc("WebAuthNFreeAssertion")
-	procGetCancellationID   = dll.NewProc("WebAuthNGetCancellationId")
-	procCancelCurrent       = dll.NewProc("WebAuthNCancelCurrentOperation")
+	procGetAPIVersionNumber       = dll.NewProc("WebAuthNGetApiVersionNumber")
+	procIsPlatformAvailable       = dll.NewProc("WebAuthNIsUserVerifyingPlatformAuthenticatorAvailable")
+	procGetAssertion              = dll.NewProc("WebAuthNAuthenticatorGetAssertion")
+	procMakeCredential            = dll.NewProc("WebAuthNAuthenticatorMakeCredential")
+	procFreeCredentialAttestation = dll.NewProc("WebAuthNFreeCredentialAttestation")
+	procFreeAssertion             = dll.NewProc("WebAuthNFreeAssertion")
+	procGetCancellationID         = dll.NewProc("WebAuthNGetCancellationId")
+	procCancelCurrent             = dll.NewProc("WebAuthNCancelCurrentOperation")
 
 	user32               = windows.NewLazySystemDLL("user32.dll")
 	procGetForegroundWnd = user32.NewProc("GetForegroundWindow")
@@ -332,4 +339,293 @@ func copyBytes(p *byte, n uint32) []byte {
 		return nil
 	}
 	return append([]byte(nil), unsafe.Slice(p, n)...)
+}
+
+// The registration structures, laid out to match webauthn.h field for field.
+
+type webauthnRPEntity struct {
+	dwVersion uint32
+	pwszID    *uint16
+	pwszName  *uint16
+	pwszIcon  *uint16
+}
+
+type webauthnUserEntity struct {
+	dwVersion       uint32
+	cbID            uint32
+	pbID            *byte
+	pwszName        *uint16
+	pwszIcon        *uint16
+	pwszDisplayName *uint16
+}
+
+type webauthnCoseParam struct {
+	dwVersion          uint32
+	pwszCredentialType *uint16
+	lAlg               int32
+	_                  uint32 // trailing padding: the struct aligns to 8
+}
+
+type webauthnCoseParams struct {
+	cCredentialParameters uint32
+	pCredentialParameters *webauthnCoseParam
+}
+
+// webauthnMakeCredentialOptions is
+// WEBAUTHN_AUTHENTICATOR_MAKE_CREDENTIAL_OPTIONS declared through version 2 --
+// version 2 is the one that carries pCancellationId, and cancellation is the
+// only way a context can bring the Windows dialog down.
+type webauthnMakeCredentialOptions struct {
+	dwVersion                         uint32
+	dwTimeoutMilliseconds             uint32
+	credentialList                    webauthnCredentials
+	extensions                        webauthnExtensions
+	dwAuthenticatorAttachment         uint32
+	bRequireResidentKey               int32
+	dwUserVerificationRequirement     uint32
+	dwAttestationConveyancePreference uint32
+	dwFlags                           uint32
+	_                                 uint32 // padding before the pointer
+
+	// Added in version 2.
+	pCancellationID *windows.GUID
+}
+
+// webauthnCredentialAttestation is WEBAUTHN_CREDENTIAL_ATTESTATION, laid out
+// through version 4 -- version 3 is where dwUsedTransport appears and version
+// 4 where bResidentKey does. Both are OBSERVATIONS of what the authenticator
+// actually did, which is the only thing that can contradict what was asked.
+type webauthnCredentialAttestation struct {
+	dwVersion               uint32
+	_                       uint32
+	pwszFormatType          *uint16
+	cbAuthenticatorData     uint32
+	_                       uint32
+	pbAuthenticatorData     *byte
+	cbAttestation           uint32
+	_                       uint32
+	pbAttestation           *byte
+	dwAttestationDecodeType uint32
+	_                       uint32
+	pvAttestationDecode     unsafe.Pointer
+	cbAttestationObject     uint32
+	_                       uint32
+	pbAttestationObject     *byte
+	cbCredentialID          uint32
+	_                       uint32
+	pbCredentialID          *byte
+
+	// Added in version 2.
+	extensions webauthnExtensions
+
+	// Added in version 3.
+	dwUsedTransport uint32
+
+	// Added in version 4.
+	bEpAtt              int32
+	bLargeBlobSupported int32
+	bResidentKey        int32
+	_                   uint32
+}
+
+const (
+	rpEntityVersion               = 1
+	userEntityVersion             = 1
+	coseParamVersion              = 1
+	makeCredentialOptVersion      = 2
+	attestationVersionTransport   = 3
+	attestationVersionResidentKey = 4
+)
+
+// Register makes a credential, through Windows.
+//
+// It blocks while Windows shows its dialog, and cancelling ctx cancels the
+// operation through Windows rather than merely abandoning the wait.
+func Register(ctx context.Context, req RegisterRequest) (*Registration, error) {
+	if err := procMakeCredential.Find(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
+	}
+	if err := req.check(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	cd, err := clientData("webauthn.create", req.Origin, req.Challenge)
+	if err != nil {
+		return nil, err
+	}
+	sha256, err := windows.UTF16PtrFromString("SHA-256")
+	if err != nil {
+		return nil, err
+	}
+	credType, err := windows.UTF16PtrFromString("public-key")
+	if err != nil {
+		return nil, err
+	}
+	rpID, err := windows.UTF16PtrFromString(req.RPID)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: relying party id: %w", err)
+	}
+	rpName, err := windows.UTF16PtrFromString(req.RPName)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: relying party name: %w", err)
+	}
+	userName, err := windows.UTF16PtrFromString(req.User.Name)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: user name: %w", err)
+	}
+	userDisplay, err := windows.UTF16PtrFromString(req.User.DisplayName)
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: user display name: %w", err)
+	}
+
+	userID := append([]byte(nil), req.User.ID...)
+	rp := webauthnRPEntity{dwVersion: rpEntityVersion, pwszID: rpID, pwszName: rpName}
+	user := webauthnUserEntity{
+		dwVersion:       userEntityVersion,
+		cbID:            uint32(len(userID)),
+		pbID:            &userID[0],
+		pwszName:        userName,
+		pwszDisplayName: userDisplay,
+	}
+	data := webauthnClientData{
+		dwVersion:        clientDataVersion,
+		cbClientDataJSON: uint32(len(cd)),
+		pbClientDataJSON: &cd[0],
+		pwszHashAlgID:    sha256,
+	}
+
+	algs := req.algorithms()
+	params := make([]webauthnCoseParam, len(algs))
+	for i, a := range algs {
+		params[i] = webauthnCoseParam{
+			dwVersion:          coseParamVersion,
+			pwszCredentialType: credType,
+			lAlg:               a,
+		}
+	}
+	coseParams := webauthnCoseParams{
+		cCredentialParameters: uint32(len(params)),
+		pCredentialParameters: &params[0],
+	}
+
+	// The exclude list. The backing arrays are named here so they outlive the
+	// call: a slice built inline in a struct literal is a pointer into
+	// something Go may move.
+	excl := make([]webauthnCredential, len(req.Exclude))
+	ids := make([][]byte, len(req.Exclude))
+	for i, c := range req.Exclude {
+		ids[i] = append([]byte(nil), c.ID...)
+		excl[i] = webauthnCredential{
+			dwVersion:          credentialVersion,
+			cbID:               uint32(len(ids[i])),
+			pbID:               &ids[i][0],
+			pwszCredentialType: credType,
+		}
+	}
+
+	opts := webauthnMakeCredentialOptions{
+		dwVersion:                         makeCredentialOptVersion,
+		dwTimeoutMilliseconds:             req.TimeoutMilliseconds,
+		dwAuthenticatorAttachment:         uint32(req.Attachment),
+		dwUserVerificationRequirement:     uint32(req.Verification),
+		dwAttestationConveyancePreference: uint32(req.Attestation),
+	}
+	if req.Discoverable {
+		opts.bRequireResidentKey = 1
+	}
+	if len(excl) > 0 {
+		opts.credentialList = webauthnCredentials{
+			cCredentials: uint32(len(excl)),
+			pCredentials: &excl[0],
+		}
+	}
+
+	var cancelID windows.GUID
+	if procGetCancellationID.Find() == nil {
+		if r, _, _ := procGetCancellationID.Call(uintptr(unsafe.Pointer(&cancelID))); uint32(r) == 0 {
+			opts.pCancellationID = &cancelID
+		}
+	}
+	if opts.pCancellationID != nil {
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			select {
+			case <-ctx.Done():
+				if procCancelCurrent.Find() == nil {
+					procCancelCurrent.Call(uintptr(unsafe.Pointer(&cancelID)))
+				}
+			case <-stop:
+			}
+		}()
+	}
+
+	hwnd := req.Window
+	if hwnd == 0 {
+		hwnd = foregroundWindow()
+	}
+	var out *webauthnCredentialAttestation
+	hr, _, _ := procMakeCredential.Call(
+		hwnd,
+		uintptr(unsafe.Pointer(&rp)),
+		uintptr(unsafe.Pointer(&user)),
+		uintptr(unsafe.Pointer(&coseParams)),
+		uintptr(unsafe.Pointer(&data)),
+		uintptr(unsafe.Pointer(&opts)),
+		uintptr(unsafe.Pointer(&out)),
+	)
+	runtime.KeepAlive(cd)
+	runtime.KeepAlive(userID)
+	runtime.KeepAlive(ids)
+	runtime.KeepAlive(excl)
+	runtime.KeepAlive(params)
+	runtime.KeepAlive(rpID)
+	runtime.KeepAlive(rpName)
+	runtime.KeepAlive(userName)
+	runtime.KeepAlive(userDisplay)
+	runtime.KeepAlive(sha256)
+	runtime.KeepAlive(credType)
+	runtime.KeepAlive(&rp)
+	runtime.KeepAlive(&user)
+	runtime.KeepAlive(&coseParams)
+	runtime.KeepAlive(&data)
+	runtime.KeepAlive(&opts)
+	runtime.KeepAlive(&cancelID)
+
+	if uint32(hr) != 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrCancelled, err)
+		}
+		return nil, &Error{Op: "WebAuthNAuthenticatorMakeCredential", HResult: uint32(hr), Name: describe(uint32(hr))}
+	}
+	if out == nil {
+		return nil, fmt.Errorf("webauthn: Windows reported success and returned nothing")
+	}
+	defer procFreeCredentialAttestation.Call(uintptr(unsafe.Pointer(out)))
+
+	reg := readAttestation(out)
+	reg.ClientDataJSON = cd
+	return reg, nil
+}
+
+// readAttestation copies what Windows filled in, before it is freed.
+func readAttestation(a *webauthnCredentialAttestation) *Registration {
+	out := &Registration{
+		CredentialID:      copyBytes(a.pbCredentialID, a.cbCredentialID),
+		AuthenticatorData: copyBytes(a.pbAuthenticatorData, a.cbAuthenticatorData),
+		AttestationObject: copyBytes(a.pbAttestationObject, a.cbAttestationObject),
+	}
+	if a.pwszFormatType != nil {
+		out.Format = windows.UTF16PtrToString(a.pwszFormatType)
+	}
+	if a.dwVersion >= attestationVersionTransport {
+		out.Transport = Transport(a.dwUsedTransport)
+	}
+	if a.dwVersion >= attestationVersionResidentKey {
+		out.Discoverable, out.DiscoverableKnown = a.bResidentKey != 0, true
+	}
+	return out
 }

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows
+//go:build !windows || (windows && !amd64 && !arm64)
 
 package webauthn
 
@@ -20,3 +20,6 @@ func Available() bool { return false }
 // anybody, it has no Windows WebAuthn API. The macOS and Linux siblings are
 // go-macos/fido and go-gnulinux/fido, over github.com/go-authn/fido.
 func Assert(context.Context, Request) (*Assertion, error) { return nil, ErrUnsupported }
+
+// Register is unavailable off Windows.
+func Register(context.Context, RegisterRequest) (*Registration, error) { return nil, ErrUnsupported }

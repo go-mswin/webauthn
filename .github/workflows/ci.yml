@@ -107,6 +107,7 @@ jobs:
           go-version-file: go.mod
       - name: Build
         run: |
+          # 386 is here on purpose: it must build the STUB, not the real thing.
           for arch in amd64 arm64 386; do
             echo "--- windows/$arch"
             GOOS=windows GOARCH="$arch" go build ./... || exit 1
