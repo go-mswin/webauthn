@@ -34,7 +34,7 @@ jobs:
       GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Gofmt
@@ -62,7 +62,7 @@ jobs:
       GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Vet
@@ -86,7 +86,7 @@ jobs:
       GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Build
@@ -102,7 +102,7 @@ jobs:
       GOTOOLCHAIN: local
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Build
