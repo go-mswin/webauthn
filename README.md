@@ -98,6 +98,29 @@ The user handle is bounded at 64 bytes here, which is WebAuthn's rule rather
 than Windows's, and it should be an opaque identifier rather than an email
 address — also the specification's rule, and a privacy one.
 
+## hmac-secret and credProtect
+
+A credential can carry a secret only the authenticator can compute, which is
+what [go-theca/theca](https://github.com/go-theca/theca) turns into a key.
+`RegisterRequest.HMACSecret` and `RegisterRequest.CredProtect` ask for the two
+extensions (`credProtect` is *required* of the authenticator, so one without it
+fails instead of making a weaker credential), and `Registration.HMACSecret` /
+`Registration.CredProtect` report what Windows says it got. `Request.HMACSalts`
+(one or two 32-byte salts) makes `Assertion.HMACSecret` carry the outputs.
+
+Per Microsoft's [webauthn.h](https://github.com/microsoft/webauthn), the
+extension list has no GetAssertion input for hmac-secret; the salts travel in
+`pHmacSecretSaltValues` of the assertion options, which exists from **API
+version 6**, with `WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG` so they are
+passed RAW rather than through the WebAuthn PRF derivation. On an older Windows
+the call fails with `ErrUnsupported` rather than returning no secret. As
+always, Windows owns the dialog and the PIN: the caller cannot supply either.
+When several discoverable credentials match, Windows asks the person to pick
+one and the salts apply to that one.
+
+Verified on Windows (API version 9): the struct layouts and the read-back
+helpers. Not verified: a call against a real key, as above.
+
 ## What it refuses to confuse
 
 - **Dismissing the dialog is not failing.** `Error.Cancelled()` is separate:

@@ -93,6 +93,11 @@ func TestARequestIsCheckedBeforeWindowsIsAsked(t *testing.T) {
 			Request{RPID: "e.test", Origin: "https://e.test", Challenge: []byte("c"), Allow: []Credential{{}}},
 			"has no id",
 		},
+		{
+			"three hmac-secret salts",
+			Request{RPID: "e.test", Origin: "https://e.test", Challenge: []byte("c"), HMACSalts: make([][32]byte, 3)},
+			"at most 2",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			err := c.req.check()
@@ -103,6 +108,11 @@ func TestARequestIsCheckedBeforeWindowsIsAsked(t *testing.T) {
 				t.Errorf("error is %q, which does not mention %q", err, c.want)
 			}
 		})
+	}
+	two := ok
+	two.HMACSalts = make([][32]byte, 2)
+	if err := two.check(); err != nil {
+		t.Errorf("two salts were refused: %v", err)
 	}
 }
 
@@ -238,6 +248,7 @@ func TestARegistrationIsCheckedBeforeWindowsIsAsked(t *testing.T) {
 		{"no challenge", RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://e.test", User: ok.User}, "challenge"},
 		{"no user id", RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://e.test", Challenge: []byte("c")}, "user id"},
 		{"a user id too long for the specification", long, "the most WebAuthn allows"},
+		{"a credProtect level that does not exist", func() RegisterRequest { r := ok; r.CredProtect = 4; return r }(), "levels are 1 to 3"},
 		{
 			"an excluded credential with no id",
 			RegisterRequest{RPID: "e.test", RPName: "E", Origin: "https://e.test", Challenge: []byte("c"), User: ok.User, Exclude: []Credential{{}}},
@@ -253,6 +264,11 @@ func TestARegistrationIsCheckedBeforeWindowsIsAsked(t *testing.T) {
 				t.Errorf("error is %q, which does not mention %q", err, c.want)
 			}
 		})
+	}
+	withExt := ok
+	withExt.HMACSecret, withExt.CredProtect = true, 3
+	if err := withExt.check(); err != nil {
+		t.Errorf("hmac-secret with credProtect 3 was refused: %v", err)
 	}
 }
 

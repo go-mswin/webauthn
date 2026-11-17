@@ -88,7 +88,8 @@ type webauthnExtensions struct {
 }
 
 // webauthnGetAssertionOptions is WEBAUTHN_AUTHENTICATOR_GET_ASSERTION_OPTIONS
-// declared through version 3.
+// laid out through version 6. dwVersion declares 3 unless hmac-secret salts are
+// asked for (then 6), so Windows reads no further than was filled in.
 type webauthnGetAssertionOptions struct {
 	dwVersion                     uint32
 	dwTimeoutMilliseconds         uint32
@@ -104,6 +105,19 @@ type webauthnGetAssertionOptions struct {
 
 	// Added in version 3.
 	pCancellationID *windows.GUID
+
+	// Added in version 4.
+	pAllowCredentialList unsafe.Pointer
+
+	// Added in version 5.
+	dwCredLargeBlobOperation uint32
+	cbCredLargeBlob          uint32
+	pbCredLargeBlob          *byte
+
+	// Added in version 6.
+	pHmacSecretSaltValues *webauthnHMACSecretSaltValues
+	bBrowserInPrivateMode int32
+	_                     uint32 // trailing padding: the struct aligns to 8
 }
 
 // webauthnAssertion is WEBAUTHN_ASSERTION, laid out through version 4 --
@@ -243,6 +257,21 @@ func Assert(ctx context.Context, req Request) (*Assertion, error) {
 		dwAuthenticatorAttachment:     uint32(req.Attachment),
 		dwUserVerificationRequirement: uint32(req.Verification),
 	}
+	var salts *hmacSalts
+	if len(req.HMACSalts) > 0 {
+		// Asking for a secret on a Windows that cannot give one must fail, not
+		// quietly return an assertion with no secret in it.
+		if v := APIVersion(); v < HMACSecretAPIVersion {
+			return nil, fmt.Errorf("%w: hmac-secret needs WebAuthn API version %d, this Windows has %d",
+				ErrUnsupported, HMACSecretAPIVersion, v)
+		}
+		if salts, err = newHMACSalts(req.HMACSalts); err != nil {
+			return nil, err
+		}
+		opts.dwVersion = getAssertionOptVersionHMAC
+		opts.dwFlags |= hmacSecretValuesFlag
+		opts.pHmacSecretSaltValues = &salts.values
+	}
 	if len(creds) > 0 {
 		opts.credentialList = webauthnCredentials{
 			cCredentials: uint32(len(creds)),
@@ -296,6 +325,7 @@ func Assert(ctx context.Context, req Request) (*Assertion, error) {
 	runtime.KeepAlive(&data)
 	runtime.KeepAlive(&opts)
 	runtime.KeepAlive(&cancelID)
+	runtime.KeepAlive(salts)
 
 	if uint32(hr) != 0 {
 		if err := ctx.Err(); err != nil {
@@ -324,6 +354,7 @@ func readAssertion(a *webauthnAssertion) *Assertion {
 		Signature:         copyBytes(a.pbSignature, a.cbSignature),
 		CredentialID:      copyBytes(a.credential.pbID, a.credential.cbID),
 		UserID:            copyBytes(a.pbUserID, a.cbUserID),
+		HMACSecret:        readHMACSecret(a),
 	}
 	// dwUsedTransport exists only from version 4. Reading it on an older
 	// Windows would be reading whatever happens to sit past the end of what
@@ -536,6 +567,11 @@ func Register(ctx context.Context, req RegisterRequest) (*Registration, error) {
 	if req.Discoverable {
 		opts.bRequireResidentKey = 1
 	}
+	exts, err := newRegisterExtensions(req)
+	if err != nil {
+		return nil, err
+	}
+	exts.apply(&opts.extensions)
 	if len(excl) > 0 {
 		opts.credentialList = webauthnCredentials{
 			cCredentials: uint32(len(excl)),
@@ -594,6 +630,7 @@ func Register(ctx context.Context, req RegisterRequest) (*Registration, error) {
 	runtime.KeepAlive(&data)
 	runtime.KeepAlive(&opts)
 	runtime.KeepAlive(&cancelID)
+	runtime.KeepAlive(exts)
 
 	if uint32(hr) != 0 {
 		if err := ctx.Err(); err != nil {
@@ -627,5 +664,6 @@ func readAttestation(a *webauthnCredentialAttestation) *Registration {
 	if a.dwVersion >= attestationVersionResidentKey {
 		out.Discoverable, out.DiscoverableKnown = a.bResidentKey != 0, true
 	}
+	readExtensions(a, out)
 	return out
 }

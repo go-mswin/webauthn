@@ -198,7 +198,24 @@ type Request struct {
 	// is a uintptr rather than a win32.HWND because Request is compiled on
 	// every platform and that type is not.
 	Window uintptr
+	// HMACSalts asks the authenticator for its hmac-secret output over one or
+	// two 32-byte salts, which are passed to the authenticator RAW
+	// (WEBAUTHN_AUTHENTICATOR_HMAC_SECRET_VALUES_FLAG), not through the WebAuthn
+	// PRF derivation. The same salts apply to whichever credential answers.
+	// Needs API version 6 ([HMACSecretAPIVersion]); a request with salts on an
+	// older Windows fails with [ErrUnsupported] rather than silently asking for
+	// no secret. Empty asks for none.
+	HMACSalts [][32]byte
 }
+
+// MaxHMACSalts is how many salts one assertion may carry: the CTAP hmac-secret
+// extension takes one or two.
+const MaxHMACSalts = 2
+
+// HMACSecretAPIVersion is the first WEBAUTHN_API_VERSION whose
+// GET_ASSERTION_OPTIONS (version 6) has pHmacSecretSaltValues. Earlier versions
+// list hmac-secret as "GetAssertion Input Type: Not Supported" in webauthn.h.
+const HMACSecretAPIVersion = 6
 
 // Assertion is what Windows returns.
 type Assertion struct {
@@ -220,6 +237,10 @@ type Assertion struct {
 	// Transport is what actually answered, or [TransportUnknown] when this
 	// Windows did not say.
 	Transport Transport
+	// HMACSecret is the authenticator's hmac-secret output, one 32-byte value
+	// per salt requested, or nil when none was requested or Windows returned
+	// none. The caller must treat nil as "no secret", never as a zero key.
+	HMACSecret [][]byte
 }
 
 // Error is a failure reported by Windows, carrying the name Windows gives it.
@@ -300,6 +321,9 @@ func (r Request) check() error {
 			return fmt.Errorf("webauthn: allowed credential %d has no id", i)
 		}
 	}
+	if len(r.HMACSalts) > MaxHMACSalts {
+		return fmt.Errorf("webauthn: %d hmac-secret salts; the extension takes at most %d", len(r.HMACSalts), MaxHMACSalts)
+	}
 	return nil
 }
 
@@ -359,6 +383,13 @@ type Registration struct {
 	// otherwise has locked somebody out of an account they can no longer
 	// select.
 	Discoverable, DiscoverableKnown bool
+	// HMACSecret reports whether Windows says the credential has the
+	// hmac-secret extension. It is an observation, and false also covers "not
+	// reported".
+	HMACSecret bool
+	// CredProtect is the credProtect level Windows says the credential has
+	// (1 to 3), or 0 when it did not report one.
+	CredProtect uint32
 }
 
 // RegisterRequest makes a credential.
@@ -395,6 +426,16 @@ type RegisterRequest struct {
 	TimeoutMilliseconds uint32
 	// Window is the HWND the dialog belongs to. Zero borrows the foreground.
 	Window uintptr
+	// HMACSecret asks for the hmac-secret extension (WEBAUTHN_EXTENSIONS_
+	// IDENTIFIER_HMAC_SECRET, a BOOL) so a later assertion can carry
+	// [Request.HMACSalts].
+	HMACSecret bool
+	// CredProtect asks for a credProtect level: 1 user verification optional,
+	// 2 optional with a credential id list, 3 required. It is REQUIRED of the
+	// authenticator (bRequireCredProtect): one without the extension fails the
+	// call instead of making a credential that is less protected than asked.
+	// Zero asks for none. Needs API version 2.
+	CredProtect uint32
 }
 
 // COSEAlgorithmES256 is ECDSA over P-256 with SHA-256: the one algorithm every
@@ -429,6 +470,9 @@ func (r RegisterRequest) check() error {
 		if len(c.ID) == 0 {
 			return fmt.Errorf("webauthn: excluded credential %d has no id", i)
 		}
+	}
+	if r.CredProtect > 3 {
+		return fmt.Errorf("webauthn: credProtect level %d; the levels are 1 to 3", r.CredProtect)
 	}
 	return nil
 }
